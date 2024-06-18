@@ -1,10 +1,6 @@
 import numpy as np
 import configparser
 
-# job.py
-
-import numpy as np
-
 class Job:
     def __init__(self):
         self.id = None
@@ -14,16 +10,18 @@ class Job:
         self.start_time = None
         self.end_time = None
         self.done = False
-        self.config = None
-        self.max_res = None
         self.send_time = None
+        self.config = configparser.ConfigParser()
 
     def generate_self(self, id, send_time):
-        # Simulating generation of processing time and resources
+        self.config.read('config.properties')
+        max_res = self.config.get('SCHEDULER', 'MAX_RES')
+
+        self.resources = np.random.randint(1, max_res)
         self.id = id
-        self.processing_time = int(np.random.poisson(5, 1)[0])  # Convert to int
+        self.processing_time = int(np.random.poisson(5, 1)[0])
         self.send_time = send_time
-        self.resources = int(np.random.randint(1, self.max_res))  # Convert to int
+
 
     def to_dict(self):
         return {

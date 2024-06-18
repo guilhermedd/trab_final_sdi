@@ -7,3 +7,7 @@ Serão criados 3 escalonadores, sendo que 1 será o mestre e os outros 2 ficarã
 
 ### Versões
 RabbitMQ: 3.12.1
+
+### Run
+`source venv/bin/activate`
+`make job`

@@ -1,4 +1,4 @@
-# trab_final_sdi
+# Trabalho Final de Sistemas Distribuídos
 ## Alunos: 
 Ana Eloina Nascimento Kraus & Guilherme Diel
 

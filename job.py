@@ -2,15 +2,23 @@ import numpy as np
 import configparser
 
 class Job:
-    def __init__(self):
-        self.id = None
-        self.processing_time = None
-        self.arrival_time = None
-        self.resources = None
-        self.start_time = None
-        self.end_time = None
+    def __init__(self, 
+                 id=None, 
+                 processing_time=None, 
+                 arrival_time=None, 
+                 resources=None, 
+                 start_time=None, 
+                 end_time = None,
+                 send_time=None
+            ):
+        self.id = id
+        self.processing_time = processing_time
+        self.arrival_time = arrival_time
+        self.resources = resources
+        self.start_time = start_time
+        self.end_time = end_time
         self.done = False
-        self.send_time = None
+        self.send_time = send_time
         self.config = configparser.ConfigParser()
 
     def generate_self(self, id, send_time):

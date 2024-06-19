@@ -13,7 +13,6 @@ def main():
 
     QUEUE = config.get('RABBITMQ', 'QUEUE')
     HOST = config.get('RABBITMQ', 'HOST')
-    KEY = config.get('RABBITMQ', 'ROUTING_KEY')
 
     # Conexão com o RabbitMQ server
     connection = pika.BlockingConnection(pika.ConnectionParameters(HOST))
@@ -29,7 +28,7 @@ def main():
 
     while True:
         sleeping_time = np.random.poisson(5, 1)[0]   # Poisson filter
-        sleep(sleeping_time)
+        sleep(0.5)
 
         current_time = datetime.now()
         formatted_time = current_time.strftime("%Y-%m-%d-%H:%M:%S")
@@ -40,7 +39,7 @@ def main():
         try:
             msg = json.dumps(job.to_dict()) # Converte o objeto Job para um dicionário e depois para JSON
             
-            channel.basic_publish(exchange='', routing_key=KEY, body=msg) # Envia a mensagem para a fila
+            channel.basic_publish(exchange='', routing_key=QUEUE, body=msg) # Envia a mensagem para a fila
             print(f"[x] Mensagem enviada: {job.to_dict()}")
             
             with open('last_id.bin', 'wb') as f:

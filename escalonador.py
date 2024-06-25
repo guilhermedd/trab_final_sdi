@@ -1,9 +1,18 @@
 import configparser
-import pika
 import json
 import threading
-import time
 import datetime
+import time
+import pika
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
+
+class TerminalColors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    END = '\033[0m'
 
 class Scheduler:
     def __init__(self):
@@ -17,84 +26,101 @@ class Scheduler:
         self.host = self.config.get('RABBITMQ', 'HOST')
         self.queue = self.config.get('RABBITMQ', 'QUEUE')
 
-        self.ids = []
-
+        self.message_queue = Queue()
+        self.current_running_jobs = []
         self.running = True
+        self.connection = None
+        self.channel = None
+        self.executor = ThreadPoolExecutor(max_workers=int(self.max_res/10))
+        self.lock = threading.Lock()
 
     def setup_rabbitmq(self):
+        while self.running:
             try:
                 self.connection = pika.BlockingConnection(pika.ConnectionParameters(self.host))
                 self.channel = self.connection.channel()
                 self.channel.queue_declare(queue=self.queue)
-                print("Iniciando consumo de mensagens")
+                print(f"{TerminalColors.GREEN}Iniciando consumo de mensagens{TerminalColors.END}")
+                return True
             except pika.exceptions.AMQPError as e:
-                print(f"Erro ao configurar RabbitMQ: {e}")
-                time.sleep(5)  # Espera antes de tentar reconectar
+                print(f"{TerminalColors.RED}Erro ao configurar RabbitMQ: {e}{TerminalColors.END}")
+                if self.connection and self.connection.is_open:
+                    self.connection.close()
+                time.sleep(1)  # Espera antes de tentar novamente
+        return False
 
     def start_consuming(self):
         while self.running:
-            self.setup_rabbitmq()
-            self.channel.basic_consume(queue=self.queue, on_message_callback=self.callback, auto_ack=False)
+            if not self.setup_rabbitmq():
+                continue  # Se a configuração falhar, continue tentando
+
             try:
+                self.channel.basic_consume(queue=self.queue, on_message_callback=self.callback, auto_ack=False)
                 self.channel.start_consuming()
             except pika.exceptions.AMQPError as e:
-                print(f"Erro ao iniciar consumo de mensagens: {e}")
-                self.setup_rabbitmq()  # Tentar reconectar em caso de erro
+                print(f"{TerminalColors.RED}Erro ao consumir mensagens: {e}{TerminalColors.END}")
+                if self.connection and self.connection.is_open:
+                    self.connection.close()
+                time.sleep(1)  # Espera antes de tentar novamente
 
     def callback(self, ch, method, properties, body):
         try:
             message = json.loads(body.decode('utf-8'))
-            if message['id'] not in self.ids:
-                print(f"Mensagem recebida: {message['id']} | processing_time: {message['processing_time']} | resources: {message['resources']}")
-                self.ids.append(message['id'])
+            print(f"Mensagem recebida: {message['id']} | processing_time: {message['processing_time']} | resources: {message['resources']}")
 
-            resources = int(message['resources'])
-            if self.cur_res + resources <= self.max_res:
-                threading.Thread(target=self.process_job, args=(message, ch, method.delivery_tag)).start()
-            else:
-                print(f"Recursos insuficientes para processar mensagem {message['id']} | Used resources: {self.cur_res} | req_res : {message['resources']}")
-                self.reject_message(ch, method.delivery_tag, message['id'])
-            
-            time.sleep(0.1)
+            with self.lock:
+                self.message_queue.put((message, ch, method.delivery_tag))
 
         except Exception as e:
-            print(f"Erro no callback: {e}")
+            print(f"{TerminalColors.RED}Erro no callback: {e}{TerminalColors.END}")
 
-    def reject_message(self, channel, delivery_tag, id):
-        try:
-            channel.basic_reject(delivery_tag=delivery_tag, requeue=True)
-            print(f"Mensagem com delivery_tag {delivery_tag} e id: {id} reenfileirada")
-        except pika.exceptions.AMQPError as e:
-            print(f"Erro ao rejeitar mensagem: {e}")
+    def process_messages(self):
+        while self.running:
+            try:
+                with self.lock:
+                    while not self.message_queue.empty():
+                        msg, channel, delivery_tag = self.message_queue.get()
+                        resources = int(msg['resources'])
 
-    def process_job(self, message, channel, delivery_tag):
-        try:
-            processing_time = int(message['processing_time'])
-            resources = int(message['resources'])
-            print(f"Processando mensagem {message['id']} por {processing_time} segundos | Tempo: {datetime.datetime.now()}")
-            self.cur_res += resources
-            time.sleep(processing_time)
+                        if self.cur_res + resources <= self.max_res:
+                            self.cur_res += resources
+                            self.current_running_jobs.append([msg, channel, delivery_tag, 0])
+                        else:
+                            self.message_queue.put((msg, channel, delivery_tag))
+            except Exception as e:
+                print(f"{TerminalColors.RED}Erro ao processar mensagem: {e}{TerminalColors.END}")
 
-            retries = 3
-            while retries > 0:
+            for job in self.current_running_jobs[:]:  # Use [:] para iterar sobre uma cópia da lista
                 try:
-                    channel.basic_ack(delivery_tag=delivery_tag)
-                    print(f"Término do processamento da mensagem {message['id']} | Tempo: {datetime.datetime.now()}")
-                    self.cur_res -= resources
-                    break
-                except pika.exceptions.AMQPError as ack_error:
-                    print(f"Erro ao enviar ack: {ack_error}")
-                    retries -= 1
-                    time.sleep(1)
+                    if job[3] >= int(job[0]['processing_time']):
+                        job[1].basic_ack(delivery_tag=job[2])
+                        self.cur_res -= int(job[0]['resources'])
+                        self.current_running_jobs.remove(job)
+                        print(f"{TerminalColors.GREEN}Término do processamento da mensagem {job[0]['id']} | Tempo: {datetime.datetime.now()}{TerminalColors.END}")
+                    else:
+                        job[3] += 1
+                except pika.exceptions.AMQPError as e:
+                    print(f"{TerminalColors.RED}Erro ao enviar ACK para mensagem {job[0]['id']}: {e}{TerminalColors.END}")
 
-        except pika.exceptions.AMQPError as e:
-            print(f"Erro ao enviar ack: {e}")
-        except Exception as e:
-            print(f"Erro no processamento da mensagem: {e}")
+                time.sleep(1)
 
     def start(self):
+        process_job_thread = threading.Thread(target=self.process_messages)
+        process_job_thread.start()
+
         self.start_consuming()
+
+    def stop(self):
+        self.running = False
+        try:
+            if self.connection:
+                self.connection.close()
+        except Exception as e:
+            print(f"{TerminalColors.RED}Erro ao fechar conexão: {e}{TerminalColors.END}")
 
 if __name__ == "__main__":
     scheduler = Scheduler()
-    scheduler.start()
+    try:
+        scheduler.start()
+    except KeyboardInterrupt:
+        scheduler.stop()

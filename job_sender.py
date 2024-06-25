@@ -5,9 +5,10 @@ import numpy as np
 import json
 from datetime import datetime
 from job import Job
+import argparse
 
 
-def main():
+def main(num_msg):
     config = configparser.ConfigParser()
     config.read('config.properties')
 
@@ -24,11 +25,14 @@ def main():
             id = int(f.read())
     except ValueError as e:
         id = 0
+    
+    if num_msg == -1:
+        num_msg = np.random.poisson(100, 1)[0]
 
 
-    while True:
+    while num_msg > 0:
         sleeping_time = np.random.poisson(5, 1)[0]   # Poisson filter
-        sleep(0.5)
+        sleep(0.1)
 
         current_time = datetime.now()
         formatted_time = current_time.strftime("%Y-%m-%d-%H:%M:%S")
@@ -49,8 +53,12 @@ def main():
         except Exception as e:
             print(f"Erro ao enviar mensagem: {e}")
             break
+        num_msg -= 1
     
     connection.close()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Enviar mensagens para RabbitMQ.')
+    parser.add_argument('num_msg', type=int, help='Número de mensagens a serem enviadas')
+    args = parser.parse_args()
+    main(args.num_msg)

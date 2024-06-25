@@ -77,7 +77,9 @@ class Scheduler:
             sorted_temp_list = sorted(temp_list, key=lambda x: x[0]['processing_time'])
             for msg, channel, delivery_tag in sorted_temp_list:
                 try:
-                    self.process_job(msg, channel, delivery_tag)
+                    process_thread = threading.Thread(target=self.process_job, args=(msg, channel, delivery_tag))
+                    process_thread.start()
+                    # self.process_job(msg, channel, delivery_tag)
 
                 except json.JSONDecodeError as e:
                     print(f"Erro ao decodificar JSON: {e}")

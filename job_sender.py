@@ -31,7 +31,7 @@ def main(num_msg):
 
 
     while num_msg > 0:
-        sleeping_time = np.random.poisson(5, 1)[0]   # Poisson filter
+        sleeping_time = np.random.poisson(1, 1)[0]   # Poisson filter
         sleep(0.1)
 
         current_time = datetime.now()

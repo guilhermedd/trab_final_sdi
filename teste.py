@@ -8,6 +8,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 import socket
 import argparse
+import signal
 
 class TerminalColors:
     RED = '\033[91m'
@@ -17,7 +18,7 @@ class TerminalColors:
     END = '\033[0m'
 
 class Scheduler:
-    def __init__(self, bully_order, is_master=False):
+    def __init__(self, semi_bully_order, is_master=False):
         self.config = configparser.ConfigParser()
         self.config.read('config.properties')
 
@@ -42,93 +43,56 @@ class Scheduler:
             (int(self.config.get('TCP', 'PORT_2')), 2),
             (int(self.config.get('TCP', 'PORT_3')), 1),
         )
-        self.bully_order = bully_order
-        self.my_port = self.ports[bully_order - 1][0]  # Seleciona a porta correta do bully_order
+        self.consensus = int(self.config.get('TCP', 'PORT_CONSENSUS'))
+        self.semi_bully_order = semi_bully_order
+        self.my_port = self.ports[semi_bully_order - 1][0]  # Seleciona a porta correta do semi_bully_order
         self.cur_master = 1
-        self.minions_alive = {port: True for port, _ in self.ports if port != self.my_port}
+        self.master_alive = False
 
-        self.server_thread = threading.Thread(target=self.listen_to_master)
-        self.server_thread.start()
-        
-        self.communication_thread = threading.Thread(target=self.communicate_to_minions)
-        self.communication_thread.start()
+        self.shut_all = False
+
+        # Configurando o tratamento de sinais
+        signal.signal(signal.SIGINT, self.handle_force_quit)
+
+    def handle_force_quit(self, signum, frame):
+        print(f"\nReceived SIGINT (Ctrl+C). Shutting down gracefully...")
 
     # TCP CON
-    def communicate_to_minions(self):
-        while True:
-            errors = 0
-            for port, _ in self.minions_alive.items():
-                try:
-                    tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    tcp_socket.connect((self.ip, port))
-                    msg = bytes("IM_MASTER", 'utf-8')
-                    tcp_socket.sendall(msg)
-                    tcp_socket.close()
-                except socket.error as e:
-                    errors += 1
-                    print(f'Error communicating with minion at port {port}: {e}')
-                    self.minions_alive[port] = False
-            
-            if errors == len(self.minions_alive):
-                self.is_master = False
-                print("Master is down.")
-            else:
-                self.is_master = True
-            
-            time.sleep(5)  # Tempo de espera entre verificações
-    
-    def listen_to_master(self):
+    def get_status(self):
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.bind((self.ip, self.my_port))
-            server_socket.listen(len(self.ports) - 1)
-            print(f'Server listening on {self.ip}:{self.my_port}')
-            
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((self.ip, self.my_port))
+                s.listen()
+                print(f'Servidor ouvindo em {self.ip}:{self.my_port}')
+                while True:
+                    conn, addr = s.accept()
+                    threading.Thread(target=self.handle_client, args=(conn, addr)).start()
+                    if self.shut_all:
+                        conn.close()
+                        break
+        except Exception as e:
+            print(f"{TerminalColors.RED}Erro ao conectar com consenso: {e}{TerminalColors.END}")
+            with self.lock:
+                self.is_master = False
+
+    def handle_client(self, conn, addr):
+        print(f'Nova conexão de {addr}')
+        with conn:
             while True:
-                client_socket, client_address = server_socket.accept()
-                print(f'Accepted connection from {client_address}')
-                
-                data = client_socket.recv(1024)
+                if self.shut_all:
+                    conn.close()
+                    return None
+                data = conn.recv(1024)
                 if not data:
                     break
-                
-                message = data.decode('utf-8').strip()
-                if message == 'IM_MASTER':
-                    print(f'Received IM_MASTER message from {client_address}')
-                    self.is_master = True
-                
-                response = 'ACK'
-                client_socket.sendall(response.encode('utf-8'))
-                
-                client_socket.close()
-                
-        except Exception as e:
-            print(f'Server error: {e}')
-        finally:
-            server_socket.close()
-    
-    def communicate(self):
-        while True:
-            if not self.is_master:
-                # Lógica para o minion se tornar o novo mestre
-                highest_order_minion = max(self.ports, key=lambda x: x[1])
-                if highest_order_minion[1] > self.bully_order and not self.is_master:
-                    print(f"I'm becoming the new master. Informing other minions.")
-                    self.is_master = True
-                    # Lógica para informar aos outros minions que sou o novo mestre
-                    for port in self.minions_alive:
-                        if port != self.my_port:
-                            try:
-                                tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                                tcp_socket.connect((self.ip, port))
-                                msg = bytes(f"NEW_MASTER {self.my_port}", 'utf-8')
-                                tcp_socket.sendall(msg)
-                                tcp_socket.close()
-                            except socket.error as e:
-                                print(f'Error communicating with minion at port {port}: {e}')
+                if data.decode('utf-8') == 'YOU_ARE_MASTER':
+                    with self.lock:
+                        self.is_master = True
+                print(f'Mensagem recebida de {addr}: {data.decode()}')
+                confirmation_message = 'ACK'
+                conn.sendall(confirmation_message.encode())
+        print(f'Conexão encerrada de {addr}')
             
-            time.sleep(5)  # Intervalo entre as verificações
-
     def setup_rabbitmq(self):
         while self.is_master:
             try:
@@ -142,21 +106,24 @@ class Scheduler:
                 if self.connection and self.connection.is_open:
                     self.connection.close()
                 time.sleep(1)  # Espera antes de tentar novamente
-        return False
+            if self.shut_all:
+                return self.stop()
 
     def start_consuming(self):
-        while self.is_master:
-            if not self.setup_rabbitmq():
+        while True:
+            if not self.setup_rabbitmq() or not self.is_master:
                 continue  # If setup fails, retry
 
             try:
                 self.channel.basic_consume(queue=self.queue, on_message_callback=self.callback, auto_ack=False)
                 self.channel.start_consuming()
-            except pika.exceptions.AMQPError as e:
+            except Exception as e:
                 print(f"{TerminalColors.RED}Erro ao consumir mensagens: {e}{TerminalColors.END}")
                 if self.connection and self.connection.is_open:
                     self.connection.close()
                 time.sleep(1)  # Espera antes de tentar novamente
+                if self.shut_all:
+                    return self.stop()
 
     def callback(self, ch, method, properties, body):
         try:
@@ -165,6 +132,8 @@ class Scheduler:
 
             with self.lock:
                 self.message_queue.put((message, ch, method.delivery_tag))
+                if not self.is_master:
+                    raise Exception("We are no longer master")
 
         except Exception as e:
             print(f"{TerminalColors.RED}Erro no callback: {e}{TerminalColors.END}")
@@ -177,12 +146,20 @@ class Scheduler:
                 ch.basic_nack(delivery_tag=delivery_tag, requeue=True)
             else:
                 print(f"{TerminalColors.RED}Erro ao rejeitar mensagem: Canal fechado.{TerminalColors.END}")
+                return self.stop()
         except pika.exceptions.AMQPError as nack_error:
             print(f"{TerminalColors.RED}Erro ao rejeitar mensagem: {nack_error}{TerminalColors.END}")
+            return self.stop()  
 
     def process_messages(self):
         print(f'{TerminalColors.BLUE}Processando mensagens...{TerminalColors.END}')
-        while self.is_master:
+        while True:
+            if not self.is_master:
+                continue
+
+            if self.shut_all:
+                return
+
             temp_list = []
 
             while not self.message_queue.empty():
@@ -204,12 +181,12 @@ class Scheduler:
                     self.executor.submit(self.process_job, msg, channel, delivery_tag)
                 except Exception as e:
                     print(f"{TerminalColors.RED}Erro no processamento da mensagem: {e}{TerminalColors.END}")
-                    self.reject_message(channel, delivery_tag)
+                    return self.reject_message(channel, delivery_tag)
 
             time.sleep(1)
 
     def process_job(self, message, channel, delivery_tag):
-        while True:
+        while self.is_master:
             try:
                 processing_time = int(message['processing_time'])
                 resources = int(message['resources'])
@@ -234,8 +211,7 @@ class Scheduler:
 
                 with self.lock:
                     self.cur_res -= resources
-                    self.reject_message(channel, delivery_tag)
-                    return
+                    return self.reject_message(channel, delivery_tag)
 
             except pika.exceptions.AMQPError as e:
                 print(f"{TerminalColors.RED}Erro no processamento da mensagem {message['id']}: {e}{TerminalColors.END}")
@@ -246,22 +222,29 @@ class Scheduler:
         process_job_thread = threading.Thread(target=self.process_messages)
         process_job_thread.start()
 
+        status_thread = threading.Thread(target=self.get_status)
+        status_thread.start()
+
         self.start_consuming()
 
     def stop(self):
+        self.shut_all = True
         self.is_master = False
         try:
             if self.connection:
                 self.connection.close()
         except Exception as e:
             print(f"{TerminalColors.RED}Erro ao fechar conexão: {e}{TerminalColors.END}")
+        return None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Indice do bully.')
+    parser = argparse.ArgumentParser(description='Indice do .')
     parser.add_argument('num_idx', type=int, help='Indice do bully')
     args = parser.parse_args()
-    scheduler = Scheduler(int(args.num_idx), args == 3)
+    master = args.num_idx == 3
+    scheduler = Scheduler(int(args.num_idx))
     try:
         scheduler.start()
     except KeyboardInterrupt:
+        print("Stopping scheduler")
         scheduler.stop()

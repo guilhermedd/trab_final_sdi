@@ -7,6 +7,3 @@ download_rabbitmq:
 
 rabbit_status: 
 	sudo systemctl status rabbitmq-server
-
-job:
-	python3 job_sender.py

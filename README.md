@@ -10,4 +10,6 @@ RabbitMQ: 3.12.1
 
 ### Run
 `source venv/bin/activate`
-`make job`
+`python3 escalonador.py <1..3>`
+`python3 job_sender.py <number_of_jobs>`
+`python3 election.py`

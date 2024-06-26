@@ -8,7 +8,8 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 import socket
 import argparse
-import signal
+import os
+import logging
 
 class TerminalColors:
     RED = '\033[91m'
@@ -18,7 +19,7 @@ class TerminalColors:
     END = '\033[0m'
 
 class Scheduler:
-    def __init__(self, semi_bully_order, is_master=False):
+    def __init__(self, election_val, is_master=False):
         self.config = configparser.ConfigParser()
         self.config.read('config.properties')
 
@@ -44,18 +45,12 @@ class Scheduler:
             (int(self.config.get('TCP', 'PORT_3')), 1),
         )
         self.consensus = int(self.config.get('TCP', 'PORT_CONSENSUS'))
-        self.semi_bully_order = semi_bully_order
-        self.my_port = self.ports[semi_bully_order - 1][0]  # Seleciona a porta correta do semi_bully_order
+        self.election_val = election_val
+        self.my_port = self.ports[election_val - 1][0]  # Seleciona a porta correta do election_val
         self.cur_master = 1
         self.master_alive = False
 
         self.shut_all = False
-
-        # Configurando o tratamento de sinais
-        signal.signal(signal.SIGINT, self.handle_force_quit)
-
-    def handle_force_quit(self, signum, frame):
-        print(f"\nReceived SIGINT (Ctrl+C). Shutting down gracefully...")
 
     # TCP CON
     def get_status(self):
@@ -63,7 +58,7 @@ class Scheduler:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((self.ip, self.my_port))
                 s.listen()
-                print(f'Servidor ouvindo em {self.ip}:{self.my_port}')
+                logging.info(f'Servidor ouvindo em {self.ip}:{self.my_port}')
                 while True:
                     conn, addr = s.accept()
                     threading.Thread(target=self.handle_client, args=(conn, addr)).start()
@@ -71,12 +66,12 @@ class Scheduler:
                         conn.close()
                         break
         except Exception as e:
-            print(f"{TerminalColors.RED}Erro ao conectar com consenso: {e}{TerminalColors.END}")
+            logging.error(f"Erro ao conectar com consenso: {e}")
             with self.lock:
                 self.is_master = False
 
     def handle_client(self, conn, addr):
-        print(f'Nova conexão de {addr}')
+        logging.info(f'Nova conexão de {addr}')
         with conn:
             while True:
                 if self.shut_all:
@@ -85,13 +80,25 @@ class Scheduler:
                 data = conn.recv(1024)
                 if not data:
                     break
-                if data.decode('utf-8') == 'YOU_ARE_MASTER':
+                message = data.decode('utf-8')
+                
+                if message == 'YOU_ARE_MASTER':
                     with self.lock:
                         self.is_master = True
-                print(f'Mensagem recebida de {addr}: {data.decode()}')
-                confirmation_message = 'ACK'
-                conn.sendall(confirmation_message.encode())
-        print(f'Conexão encerrada de {addr}')
+                    confirmation_message = 'ACK'
+                    conn.sendall(confirmation_message.encode())
+                    logging.info("Agora eu sou o mestre!")
+                elif message == 'YOUR_ID':
+                    confirmation_message = f'ID:{self.election_val}'
+                    conn.sendall(confirmation_message.encode())
+                elif message == 'ACK':
+                    logging.info(f'Mensagem recebida de {addr}: {data.decode()}')
+                elif message == 'NOT_MASTER':
+                    logging.info(f'Mensagem recebida de {addr}: {data.decode()}')
+                    with self.lock:
+                        self.is_master = False
+        
+        logging.info(f'Conexão encerrada de {addr}')
             
     def setup_rabbitmq(self):
         while self.is_master:
@@ -106,8 +113,6 @@ class Scheduler:
                 if self.connection and self.connection.is_open:
                     self.connection.close()
                 time.sleep(1)  # Espera antes de tentar novamente
-            if self.shut_all:
-                return self.stop()
 
     def start_consuming(self):
         while True:
@@ -146,9 +151,11 @@ class Scheduler:
                 ch.basic_nack(delivery_tag=delivery_tag, requeue=True)
             else:
                 print(f"{TerminalColors.RED}Erro ao rejeitar mensagem: Canal fechado.{TerminalColors.END}")
+                self.force_quit_current_process()
                 return self.stop()
         except pika.exceptions.AMQPError as nack_error:
             print(f"{TerminalColors.RED}Erro ao rejeitar mensagem: {nack_error}{TerminalColors.END}")
+            self.force_quit_current_process()
             return self.stop()  
 
     def process_messages(self):
@@ -236,6 +243,15 @@ class Scheduler:
         except Exception as e:
             print(f"{TerminalColors.RED}Erro ao fechar conexão: {e}{TerminalColors.END}")
         return None
+    
+    def force_quit_current_process(self):
+        try:
+            current_pid = os.getpid()
+            os.system(f"kill -9 {current_pid}")
+            print(f"Programa Python (PID: {current_pid}) foi forçadamente encerrado.")
+        except Exception as e:
+            print(f"Erro ao tentar forçar o encerramento do programa: {str(e)}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indice do .')

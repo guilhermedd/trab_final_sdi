@@ -27,7 +27,7 @@ class Job:
 
         self.resources = np.random.randint(1, max_res)
         self.id = id
-        self.processing_time = int(np.random.poisson(5, 1)[0])
+        self.processing_time = int(np.random.poisson(3, 1)[0])
         self.send_time = send_time
 
 

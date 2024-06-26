@@ -1,13 +1,11 @@
 import socket
-import configparser
-import time
 import threading
 import logging
+import time
+import configparser
 
-# Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Ler a configuração do arquivo
 config = configparser.ConfigParser()
 config.read('config.properties')
 
@@ -31,36 +29,74 @@ def get_onlines(ip, ports):
                 continue
     return onlines
 
-def send_master_msg(ip, port):
+def send_master_msg(ip, port, timeout=2):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
             s.connect((ip, port))
             message = 'YOU_ARE_MASTER'
             s.sendall(message.encode())
+            
             while True:
                 response = s.recv(1024).decode('utf-8')
                 if response == 'ACK':
                     logging.info(f'Received ACK from server. Port {port} is the new master')
-                    time.sleep(5)  # Aguardando 5 segundos antes de enviar a próxima mensagem
+                    time.sleep(3)  # Aguardando 5 segundos antes de enviar a próxima mensagem
                     s.sendall(message.encode())
                 else:
                     break
-    except ConnectionRefusedError:
-        logging.error(f'Não foi possível conectar ao servidor em {ip}:{port}. O servidor pode estar offline.')
     except socket.timeout:
         logging.error(f'Tempo de conexão excedido ao tentar conectar a {ip}:{port}.')
+    except ConnectionRefusedError:
+        logging.error(f'Não foi possível conectar ao servidor em {ip}:{port}. O servidor pode estar offline.')
     except Exception as e:
-        logging.error(f'Ocorreu um erro: {e}')
-    return False
+        logging.error(f'Ocorreu um erro durante a comunicação: {e}')
+
+def get_values(ip, ports, timeout=2):
+    vals = []
+    for port in ports:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect((ip, port))
+                message = 'YOUR_ID'
+                s.sendall(message.encode())
+                
+                while True:
+                    response = s.recv(1024).decode('utf-8')
+                    if response.startswith('ID'):
+                        id = response.split(':')[1]
+                        logging.info(f'Received ACK from server. Port {port} is the new master')
+                        time.sleep(1)  # Aguardando 1 segundo antes de enviar a próxima mensagem
+                        s.sendall("ACK".encode())
+                        vals.append([port, int(id)])
+                    else:
+                        break
+        except socket.timeout:
+            logging.error(f'Tempo de conexão excedido ao tentar conectar a {ip}:{port}.')
+        except ConnectionRefusedError:
+            logging.error(f'Não foi possível conectar ao servidor em {ip}:{port}. O servidor pode estar offline.')
+        except Exception as e:
+            logging.error(f'Ocorreu um erro durante a comunicação: {e}')
+    
+    if vals:
+        vals.sort(key=lambda x: x[1])
+        return vals[0]
+    return None, None
 
 def main():
     while True:
         onlines = get_onlines(ip, ports)
-        for port in onlines:
-            while True:
-                if not send_master_msg(ip, port):
-                    break
-                time.sleep(5)
+        if onlines:
+            port, id = get_values(ip, onlines)
+            if port is not None:
+                aux = onlines[:]
+                aux.remove(port)
+                send_master_msg(ip, port)
+            time.sleep(2)
+        else:
+            logging.warning('Nenhum servidor online encontrado. Tentando novamente em breve.')
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
